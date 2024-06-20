@@ -4,58 +4,61 @@ import numpy as np
 import os
 from collections import deque
 from datetime import datetime
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+from torch.utils.tensorboard import SummaryWriter
 
 import model as m
 from atari_wrappers import wrap_deepmind, make_atari
+import yaml
 
-# 1. GPU settings
-os.environ['CUDA_VISIBLE_DEVICES'] = '1' 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu") # if gpu is to be used
+# 加载配置文件
+with open('config.yaml', 'r') as f:
+    config = yaml.safe_load(f)
 
-# 3. environment reset
-#env_name = 'Breakout'
-#env_name = 'SpaceInvaders'
-env_name = 'Riverraid'
-#env_name = 'Seaquest'
-#env_name = 'MontezumaRevenge'
+# 从配置文件中读取参数
+device = config['device']
+env_name = config['env_name']
+BATCH_SIZE = config['batch_size']
+GAMMA = config['gamma']
+EPS_START = config['eps_start']
+EPS_END = config['eps_end']
+EPS_DECAY = config['eps_decay']
+TARGET_UPDATE = config['target_update']
+NUM_STEPS = config['num_steps']
+M_SIZE = config['memory_size']
+POLICY_UPDATE = config['policy_update']
+EVALUATE_FREQ = config['evaluate_freq']
+LEARNING_RATE = config['lr']
+ADAM_EPS = config['adam_eps']
+EVALUATE_EPS = config['evaluate_eps']
+EVALUATE_NUM_EPISODES = config['evaluate_num_episodes']
+
 env_raw = make_atari('{}NoFrameskip-v4'.format(env_name))
 env = wrap_deepmind(env_raw, frame_stack=False, episode_life=True, clip_rewards=True)
 
-c,h,w = m.fp(env.reset()).shape
+c, h, w = m.fp(env.reset()).shape
 n_actions = env.action_space.n
 print(n_actions)
 
-# 4. Network reset
 policy_net = m.DQN(h, w, n_actions, device).to(device)
 target_net = m.DQN(h, w, n_actions, device).to(device)
 policy_net.apply(policy_net.init_weights)
 target_net.load_state_dict(policy_net.state_dict())
 target_net.eval()
 
-# 5. DQN hyperparameters
-BATCH_SIZE = 32
-GAMMA = 0.99
-EPS_START = 1.
-EPS_END = 0.1
-EPS_DECAY = 1000000
-TARGET_UPDATE = 10000
-NUM_STEPS = 50000000
-M_SIZE = 1000000
-POLICY_UPDATE = 4
-EVALUATE_FREQ = 200000
-optimizer = optim.Adam(policy_net.parameters(), lr=0.0000625, eps=1.5e-4)
+# 创建adam
+optimizer = optim.Adam(policy_net.parameters(), lr=LEARNING_RATE, eps=ADAM_EPS)
 
-# replay memory and action selector
-memory = m.ReplayMemory(M_SIZE, [5,h,w], n_actions, device)
+memory = m.ReplayMemory(M_SIZE, [5, h, w], n_actions, device)
 sa = m.ActionSelector(EPS_START, EPS_END, policy_net, EPS_DECAY, n_actions, device)
 
 steps_done = 0
+writer = SummaryWriter(log_dir=config['log_dir'])
 
 def optimize_model(train):
     if not train:
@@ -65,18 +68,17 @@ def optimize_model(train):
     q = policy_net(state_batch).gather(1, action_batch)
     nq = target_net(n_state_batch).max(1)[0].detach()
 
-    # Compute the expected Q values
-    expected_state_action_values = (nq * GAMMA)*(1.-done_batch[:,0]) + reward_batch[:,0]
+    expected_state_action_values = (nq * GAMMA) * (1. - done_batch[:, 0]) + reward_batch[:, 0]
 
-    # Compute Huber loss
     loss = F.smooth_l1_loss(q, expected_state_action_values.unsqueeze(1))
 
-    # Optimize the model
     optimizer.zero_grad()
     loss.backward()
     for param in policy_net.parameters():
         param.grad.data.clamp_(-1, 1)
     optimizer.step()
+
+    writer.add_scalar('Loss/train', loss.item(), global_step=steps_done)
 
 def evaluate(step, policy_net, device, env, n_actions, eps=0.05, num_episode=5):
     env = wrap_deepmind(env)
@@ -86,24 +88,24 @@ def evaluate(step, policy_net, device, env, n_actions, eps=0.05, num_episode=5):
     for i in range(num_episode):
         env.reset()
         e_reward = 0
-        for _ in range(10): # no-op
+        for _ in range(10):
             n_frame, _, done, _ = env.step(0)
             n_frame = m.fp(n_frame)
             q.append(n_frame)
 
         while not done:
             state = torch.cat(list(q))[1:].unsqueeze(0)
-            action, eps = sa.select_action(state, train)
+            action, eps = sa.select_action(state, train=False)
             n_frame, reward, done, info = env.step(action)
             n_frame = m.fp(n_frame)
             q.append(n_frame)
-            
+
             e_reward += reward
         e_rewards.append(e_reward)
 
-    f = open("file.txt",'a') 
-    f.write("%f, %d, %d\n" % (float(sum(e_rewards))/float(num_episode), step, num_episode))
-    f.close()
+    avg_reward = float(sum(e_rewards)) / float(num_episode)
+    writer.add_scalar('Reward/eval', avg_reward, global_step=step)
+    writer.add_scalar('Eps/eval', eps, global_step=step)
 
 q = deque(maxlen=5)
 done = True
@@ -112,37 +114,33 @@ episode_len = 0
 
 progressive = tqdm(range(NUM_STEPS), total=NUM_STEPS, ncols=50, leave=False, unit='b')
 for step in progressive:
-    if done: # life reset !!!
+    if done:
         env.reset()
         sum_reward = 0
         episode_len = 0
-        img, _, _, _ = env.step(1) # BREAKOUT specific !!!
-        for i in range(10): # no-op
+        img, _, _, _ = env.step(1)
+        for i in range(10):
             n_frame, _, _, _ = env.step(0)
             n_frame = m.fp(n_frame)
             q.append(n_frame)
-        
+
     train = len(memory) > 50000
-    # Select and perform an action
     state = torch.cat(list(q))[1:].unsqueeze(0)
     action, eps = sa.select_action(state, train)
     n_frame, reward, done, info = env.step(action)
     n_frame = m.fp(n_frame)
 
-    # 5 frame as memory
     q.append(n_frame)
-    memory.push(torch.cat(list(q)).unsqueeze(0), action, reward, done) # here the n_frame means next frame from the previous time step
+    memory.push(torch.cat(list(q)).unsqueeze(0), action, reward, done)
     episode_len += 1
 
-    # Perform one step of the optimization (on the target network)
     if step % POLICY_UPDATE == 0:
         optimize_model(train)
-    
-    # Update the target network, copying all weights and biases in DQN
+
     if step % TARGET_UPDATE == 0:
         target_net.load_state_dict(policy_net.state_dict())
-    
+
     if step % EVALUATE_FREQ == 0:
-        evaluate(step, policy_net, device, env_raw, n_actions, eps=0.05, num_episode=15)
+        evaluate(step, policy_net, device, env_raw, n_actions, eps=EVALUATE_EPS, num_episode=EVALUATE_NUM_EPISODES)
 
-
+writer.close()

@@ -18,11 +18,3 @@ Testing score is calculated by averaging 15 testing episodes every 200,000 train
  Seaquest | 7274.666667 | 8600000 (8.6M)
  RiverRaid | 8382.000000 | 6400000 (6.4M)
 
-## Requirements
-
-* **python 3.6**
-* **gym**
-* **cv2**
-* **pytorch-1.1.0** 
-* **numpy**
-* **35+GB memory**

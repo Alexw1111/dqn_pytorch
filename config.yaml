@@ -1,0 +1,29 @@
+# 设备选择: 'cuda' 或 'cpu'
+device: cuda
+
+# 环境设置
+env_name: Breakout  # 可选: 'Breakout', 'SpaceInvaders', 'Riverraid', 'Seaquest', 'MontezumaRevenge'
+
+# 训练设置
+batch_size: 32        # 批次大小
+gamma: 0.99           # 折扣因子
+eps_start: 1.0        # epsilon-贪婪策略的初始探索率
+eps_end: 0.1          # epsilon-贪婪策略的最终探索率
+eps_decay: 1000000    # epsilon衰减的步数
+target_update: 10000  # 目标网络更新频率
+num_steps: 50000000   # 总训练步数
+memory_size: 1000000  # 经验回放缓存大小
+policy_update: 4      # 策略网络更新频率
+evaluate_freq: 200000 # 评估频率
+lr: 0.0000625         # 学习率
+adam_eps: 1e-8        # Adam优化器的epsilon值
+
+# 评估设置
+evaluate_eps: 0.05         # 评估时的探索率
+evaluate_num_episodes: 15  # 评估时的游戏局数
+
+# 其他设置
+
+seed: 42         # 随机种子
+save_dir: checkpoints  # 模型保存目录
+log_dir: logs          # TensorBoard日志目录

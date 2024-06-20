@@ -1,3 +1,4 @@
+# 此文件基于https://github.com/wetliu/dqn_pytorch/blob/master/model.py
 import gym
 import math
 import random
@@ -24,11 +25,11 @@ class DQN(nn.Module):
     
     def init_weights(self, m):
         if type(m) == nn.Linear:
-            torch.nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+            nn.init.kaiming_normal(m.weight, nonlinearity='relu')
             m.bias.data.fill_(0.0)
         
         if type(m) == nn.Conv2d:
-            torch.nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+            nn.init.kaiming_normal(m.weight, nonlinearity='relu')
             #m.bias.data.fill_(0.1)
     
     def forward(self, x):
