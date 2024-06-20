@@ -4,9 +4,9 @@ This implementation follows the benchmark and implementations of DQN. The traini
 
 ## Usage
 ```
-python dqn.py
+python train.py
 ```
-You are able to change the env in dqn.py
+You are able to change the env in config.yaml
 
 ## Benchmark Results
 Testing score is calculated by averaging 15 testing episodes every 200,000 training steps, and is compared with the best scores reported in the paper - [DQN](https://web.stanford.edu/class/psych209/Readings/MnihEtAlHassibis15NatureControlDeepRL.pdf). After the paper score is reached, the game is terminated. 
