@@ -111,7 +111,7 @@ class FrameProcessor():
         frame = frame[46:160+46, :]
 
         frame = cv2.resize(frame, (im_size, im_size), interpolation=cv2.INTER_LINEAR)
-        frame = frame.reshape((1, im_size, im_size))
+        frame = frame.reshape((1, im_size, im_size)).astype(np.uint8)
 
         x = torch.from_numpy(frame)
         return x
