@@ -8,7 +8,7 @@ python train.py
 ```
 你可以在config.yaml文件中更改配置
 ```
-tensorboard --logdir=/path/to/log_dir
+tensorboard --logdir=logs
 ```
 启动tensorboard
 
