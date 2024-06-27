@@ -16,7 +16,7 @@ memory_size: 1000000  # 经验回放缓存大小
 policy_update: 4      # 策略网络更新频率
 evaluate_freq: 200000 # 评估频率
 lr: 0.0000625         # 学习率
-adam_eps: 1e-8        # Adam优化器的epsilon值
+adam_eps: 1.0e-8      # Adam优化器的epsilon值
 
 # 评估设置
 evaluate_eps: 0.05         # 评估时的探索率

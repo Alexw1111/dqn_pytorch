@@ -1,9 +1,21 @@
 # dqn_pytorch
 ## 介绍
-基于[https://github.com/wetliu/dqn_pytorch]的强化学习游戏的demo
+DQN强化学习demo
 
 ## 介绍
 ```
 python train.py
 ```
-你可以在config.yaml文件中更改环境
+你可以在config.yaml文件中更改配置
+```
+tensorboard --logdir=/path/to/log_dir
+```
+启动tensorboard
+
+## 依赖
+- python 3.10
+- pytorch 2.1.2
+- gymnasium 
+
+## 参考
+https://github.com/wetliu/dqn_pytorch
