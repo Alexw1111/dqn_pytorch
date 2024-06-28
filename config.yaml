@@ -5,27 +5,32 @@ device: cuda
 env_name: Breakout  # 可选: 'Breakout', 'SpaceInvaders', 'Riverraid', 'Seaquest', 'MontezumaRevenge'
 
 # 训练设置
-batch_size: 32        # 批次大小
+batch_size: 128       # 批次大小
 gamma: 0.99           # 折扣因子
 eps_start: 1.0        # epsilon-贪婪策略的初始探索率
-eps_end: 0.1          # epsilon-贪婪策略的最终探索率
+eps_end: 0.01         # 稍微降低最终探索率，以增加利用率
 eps_decay: 1000000    # epsilon衰减的步数
 target_update: 10000  # 目标网络更新频率
 num_steps: 5000000   # 总训练步数
 memory_size: 1000000  # 经验回放缓存大小
 policy_update: 4      # 策略网络更新频率
-evaluate_freq: 200000 # 评估频率
+evaluate_freq: 250000 # 稍微增加评估频率
 lr: 0.0000625         # 学习率
 adam_eps: 1.0e-8      # Adam优化器的epsilon值
 
 # 评估设置
 evaluate_eps: 0.05         # 评估时的探索率
-evaluate_num_episodes: 15  # 评估时的游戏局数
+evaluate_num_episodes: 20  # 评估时的游戏局数
 
 # 其他设置
-
 seed: 42         # 随机种子
 save_dir: checkpoints  # 模型保存目录
-save_frequency: 50000  # 保存检查点的频率（步数）
+save_frequency: 100000  # 增加保存检查点的频率
 log_dir: logs          # TensorBoard日志目录
-inference_model_path: 'checkpoints\Breakout_final_model.pth'  # 要推理的文件的路径
+inference_model_path: 'checkpoints/Breakout_best_model.pth'  # 推理模型路径请修改
+
+use_mixed_precision: true  # 启用混合精度训练
+learning_rate_decay: 0.99  # 每 100000 步衰减学习率
+prioritized_replay_alpha: 0.6  # PER alpha 参数
+prioritized_replay_beta: 0.4  # PER beta 参数
+prioritized_replay_beta_frames: 100000  # PER beta 线性增加的帧数

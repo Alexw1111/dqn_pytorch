@@ -1,17 +1,19 @@
 import os
 import random
-from typing import Dict, Any
+from typing import Dict, Any, Tuple
 
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.optim as optim
 import torch.nn.functional as F
 import yaml
-from torch import optim
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+from torch.cuda.amp import GradScaler, autocast
 
 import model as m
-from atari_wrappers import make_atari, wrap_deepmind
+from atari_wrappers import wrap_deepmind, make_atari
 
 def load_config(config_path: str) -> Dict[str, Any]:
     """Load configuration from a YAML file."""
@@ -23,23 +25,23 @@ def setup_environment(env_name: str) -> Any:
     env_raw = make_atari(f'{env_name}NoFrameskip-v4')
     return wrap_deepmind(env_raw, frame_stack=True, episode_life=True, clip_rewards=True)
 
-def initialize_networks(observation_shape: tuple, n_actions: int, device: torch.device) -> tuple:
+def initialize_networks(observation_shape: Tuple[int, ...], n_actions: int, device: torch.device) -> Tuple[m.DQN, m.DQN]:
     """Initialize the policy and target networks."""
-    h, w = observation_shape[2], observation_shape[3]  # 假设 observation_shape 是 (batch, channel, height, width)
-    policy_net = m.DQN(h, w, n_actions).to(device)
-    target_net = m.DQN(h, w, n_actions).to(device)
+    policy_net = m.DQN(observation_shape[2], observation_shape[3], n_actions).to(device)
+    target_net = m.DQN(observation_shape[2], observation_shape[3], n_actions).to(device)
     policy_net.apply(policy_net.init_weights)
     target_net.load_state_dict(policy_net.state_dict())
     target_net.eval()
     return policy_net, target_net
 
 def optimize_model(policy_net: m.DQN, target_net: m.DQN, optimizer: optim.Optimizer, 
-                   memory: m.ReplayMemory, batch_size: int, gamma: float, device: torch.device) -> float:
+                   memory: m.PrioritizedReplayMemory, batch_size: int, gamma: float, 
+                   device: torch.device, scaler: GradScaler) -> float:
     """Perform one step of optimization on the DQN."""
     if len(memory) < batch_size:
         return None
 
-    transitions = memory.sample(batch_size)
+    transitions, idxs, is_weights = memory.sample(batch_size)
     batch = m.Transition(*zip(*transitions))
 
     non_final_mask = torch.tensor(tuple(map(lambda s: s is not None, batch.next_state)), 
@@ -50,51 +52,30 @@ def optimize_model(policy_net: m.DQN, target_net: m.DQN, optimizer: optim.Optimi
     action_batch = torch.cat(batch.action).to(device)
     reward_batch = torch.cat(batch.reward).to(device)
 
-    state_action_values = policy_net(state_batch).gather(1, action_batch)
+    with autocast():
+        state_action_values = policy_net(state_batch).gather(1, action_batch)
 
-    next_state_values = torch.zeros(batch_size, device=device)
-    with torch.no_grad():
-        next_state_values[non_final_mask] = target_net(non_final_next_states).max(1)[0]
-    expected_state_action_values = (next_state_values * gamma) + reward_batch
+        next_state_values = torch.zeros(batch_size, device=device)
+        with torch.no_grad():
+            next_state_values[non_final_mask] = target_net(non_final_next_states).max(1)[0].to(torch.float32)
+        expected_state_action_values = (next_state_values * gamma) + reward_batch
 
-    loss = F.smooth_l1_loss(state_action_values, expected_state_action_values.unsqueeze(1))
+        loss = (F.smooth_l1_loss(state_action_values, expected_state_action_values.unsqueeze(1), reduction='none') * torch.tensor(is_weights, device=device)).mean()
 
     optimizer.zero_grad()
-    loss.backward()
+    scaler.scale(loss).backward()
+    scaler.unscale_(optimizer)
     torch.nn.utils.clip_grad_norm_(policy_net.parameters(), max_norm=100)
-    optimizer.step()
+    scaler.step(optimizer)
+    scaler.update()
+
+    # Update priorities
+    with torch.no_grad():
+        td_errors = torch.abs(state_action_values.float() - expected_state_action_values.unsqueeze(1)).detach().cpu().numpy()
+    new_priorities = td_errors + 1e-6  # small constant to ensure non-zero priority
+    memory.update_priorities(idxs, new_priorities)
 
     return loss.item()
-
-def evaluate(policy_net: m.DQN, env: Any, action_selector: m.ActionSelector, device: torch.device, 
-             num_episodes: int) -> float:
-    """Evaluate the current policy network."""
-    total_reward = 0
-    for _ in range(num_episodes):
-        obs, _ = env.reset()
-        obs = m.fp(np.array(obs))
-        done = False
-        episode_reward = 0
-        while not done:
-            state = obs.to(device)
-            action, _ = action_selector.select_action(state, train=False)
-            next_obs, reward, terminated, truncated, _ = env.step(action.item())
-            done = terminated or truncated
-            obs = m.fp(np.array(next_obs))
-            episode_reward += reward
-        total_reward += episode_reward
-    return total_reward / num_episodes
-
-def save_checkpoint(step: int, policy_net: m.DQN, optimizer: optim.Optimizer, 
-                    best_eval_reward: float, save_path: str):
-    """Save a training checkpoint."""
-    torch.save({
-        'step': step,
-        'policy_net_state_dict': policy_net.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'best_eval_reward': best_eval_reward
-    }, save_path)
-    print(f"Checkpoint saved at step {step}")
 
 def main():
     """Main training loop."""
@@ -109,33 +90,34 @@ def main():
 
     policy_net, target_net = initialize_networks(observation_shape, n_actions, device)
     optimizer = optim.Adam(policy_net.parameters(), lr=config['lr'], eps=config['adam_eps'])
-    memory = m.ReplayMemory(config['memory_size'])
+    memory = m.PrioritizedReplayMemory(config['memory_size'])
     action_selector = m.ActionSelector(config['eps_start'], config['eps_end'], 
                                        policy_net, config['eps_decay'], n_actions, device)
 
     writer = SummaryWriter(log_dir=config['log_dir'])
     os.makedirs(config['save_dir'], exist_ok=True)
 
-    best_eval_reward = float('-inf')
-    obs = m.fp(np.array(env.reset()[0]))
+    scaler = GradScaler()
+
+    obs = m.fp(np.array(env.reset()[0])).to(device)
     episode_reward = 0
 
     for step in tqdm(range(config['num_steps']), total=config['num_steps'], ncols=50, leave=False, unit='b'):
-        state = obs.to(device)
-        action, eps = action_selector.select_action(state, train=True)
+        action, eps = action_selector.select_action(obs, train=True)
         next_obs, reward, terminated, truncated, _ = env.step(action.item())
         done = terminated or truncated
         reward = torch.tensor([reward], device=device)
 
-        next_state = m.fp(np.array(next_obs)) if not done else None
-        memory.push(state, action, next_state, reward, done)
-        obs = next_state if next_state is not None else m.fp(np.array(env.reset()[0]))
+        next_state = m.fp(np.array(next_obs)).to(device) if not done else None
+        memory.push(obs, action, next_state, reward, done)
+
+        obs = next_state if next_state is not None else m.fp(np.array(env.reset()[0])).to(device)
 
         episode_reward += reward.item()
 
         if step % config['policy_update'] == 0:
             loss = optimize_model(policy_net, target_net, optimizer, memory, 
-                                  config['batch_size'], config['gamma'], device)
+                                  config['batch_size'], config['gamma'], device, scaler)
             if loss is not None:
                 writer.add_scalar('Loss/train', loss, global_step=step)
 
@@ -147,26 +129,15 @@ def main():
             writer.add_scalar('Epsilon', eps, global_step=step)
             episode_reward = 0
 
-        if step % config['evaluate_freq'] == 0:
-            eval_reward = evaluate(policy_net, env, action_selector, device, config['evaluate_num_episodes'])
-            writer.add_scalar('Reward/eval', eval_reward, global_step=step)
-            print(f"Step {step}: Evaluation average reward: {eval_reward}")
-            if eval_reward > best_eval_reward:
-                best_eval_reward = eval_reward
-                torch.save(policy_net.state_dict(), 
-                           os.path.join(config['save_dir'], f'{config["env_name"]}_best_model.pth'))
-                print(f"New best model saved with reward: {best_eval_reward}")
-
         if (step + 1) % config['save_frequency'] == 0:
-            save_checkpoint(step + 1, policy_net, optimizer, best_eval_reward,
-                            os.path.join(config['save_dir'], f'{config["env_name"]}_checkpoint_step_{step+1}.pth'))
-
-    # Save final model
-    final_model_path = os.path.join(config['save_dir'], f'{config["env_name"]}_final_model.pth')
-    torch.save(policy_net.state_dict(), final_model_path)
-    print(f"Training completed. Final model saved to {final_model_path}")
+            torch.save({
+                'step': step + 1,
+                'policy_net_state_dict': policy_net.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+            }, os.path.join(config['save_dir'], f'{config["env_name"]}_checkpoint_step_{step+1}.pth'))
 
     writer.close()
+    print("Training completed.")
 
 if __name__ == "__main__":
     main()
