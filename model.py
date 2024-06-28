@@ -36,7 +36,7 @@ class DQN(nn.Module):
         return self.out(x)
 
     def init_weights(self, m: nn.Module):
-        if isinstance(m, nn.Linear) or isinstance(m, nn.Conv2d):
+        if isinstance(m, (nn.Linear, nn.Conv2d)):
             torch.nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
             if m.bias is not None:
                 torch.nn.init.constant_(m.bias, 0)

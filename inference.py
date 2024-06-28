@@ -1,57 +1,66 @@
-import torch
+import os
+from typing import Tuple, Any
+
 import numpy as np
-from collections import deque
-from atari_wrappers import wrap_deepmind, make_atari
-import model as m
+import torch
 import yaml
-import gym
-from gym import wrappers
+import gymnasium as gym
 
-# 加载配置文件
-with open('config.yaml', 'r') as f:
-    config = yaml.safe_load(f)
+import model as m
+from atari_wrappers import wrap_deepmind, make_atari
 
-# 从配置文件中读取参数
-device = config['device']
-env_name = config['env_name']
-EVALUATE_EPS = config['evaluate_eps']
+def load_config(config_path: str) -> dict:
+    """Load configuration from a YAML file."""
+    with open(config_path, 'r', encoding='utf-8') as f:
+        return yaml.safe_load(f)
 
-def load_model(model_path):
-    env_raw = make_atari('{}NoFrameskip-v4'.format(env_name))
-    env = wrap_deepmind(env_raw, frame_stack=False, episode_life=False, clip_rewards=False)
+def load_model(model_path: str, env_name: str, device: str) -> Tuple[m.DQN, Any, int]:
+    """Load the trained model and set up the environment."""
+    env_raw = make_atari(f'{env_name}NoFrameskip-v4')
+    env = wrap_deepmind(env_raw, frame_stack=True, episode_life=False, clip_rewards=False)
     
-    c, h, w = m.fp(env.reset()).shape
+    obs, _ = env.reset()
+    obs = m.fp(np.array(obs))
+    c, h, w = obs.shape[1], obs.shape[2], obs.shape[3]
     n_actions = env.action_space.n
     
-    policy_net = m.DQN(h, w, n_actions, device).to(device)
-    policy_net.load_state_dict(torch.load(model_path))
+    policy_net = m.DQN(h, w, n_actions).to(device)
+    policy_net.load_state_dict(torch.load(model_path, map_location=device))
     policy_net.eval()
     
     return policy_net, env, n_actions
 
-def run_inference(policy_net, env, n_actions, num_episodes=10, record_video=True):
-    sa = m.ActionSelector(EVALUATE_EPS, EVALUATE_EPS, policy_net, 0, n_actions, device)
+def run_inference(policy_net: m.DQN, env: Any, n_actions: int, device: str, 
+                  evaluate_eps: float, num_episodes: int = 10, record_video: bool = True):
+    """Run the trained model on the environment and optionally record videos."""
+    sa = m.ActionSelector(evaluate_eps, evaluate_eps, policy_net, 0, n_actions, device)
     
     if record_video:
-        env = gym.wrappers.Monitor(env, "./videos", video_callable=lambda episode_id: True, force=True)
+        try:
+            env = gym.wrappers.RecordVideo(env, "videos", episode_trigger=lambda episode_id: True)
+        except gym.error.DependencyNotInstalled:
+            print("Warning: Unable to record video. moviepy is not installed.")
+            print("Continuing without video recording.")
+            record_video = False
     
     for episode in range(num_episodes):
-        env.reset()
+        obs, _ = env.reset()
+        obs = m.fp(np.array(obs))
         total_reward = 0
         done = False
-        q = deque(maxlen=5)
-        
-        for _ in range(10):
-            n_frame, _, done, _ = env.step(0)
-            n_frame = m.fp(n_frame)
-            q.append(n_frame)
         
         while not done:
-            state = torch.cat(list(q))[1:].unsqueeze(0)
+            state = obs.to(device)
+            # 确保state的维度正确
+            if state.dim() == 3:
+                state = state.unsqueeze(0)  # 添加batch维度
+            elif state.dim() == 5:
+                state = state.squeeze(1)  # 移除多余的维度
+            
             action, _ = sa.select_action(state, train=False)
-            n_frame, reward, done, info = env.step(action)
-            n_frame = m.fp(n_frame)
-            q.append(n_frame)
+            next_obs, reward, terminated, truncated, _ = env.step(action.item())
+            done = terminated or truncated
+            obs = m.fp(np.array(next_obs))
             
             total_reward += reward
         
@@ -59,7 +68,20 @@ def run_inference(policy_net, env, n_actions, num_episodes=10, record_video=True
     
     env.close()
 
+def main():
+    """Main function to run the inference."""
+    config = load_config('config.yaml')
+    device = torch.device(config['device'])
+    env_name = config['env_name']
+    evaluate_eps = config['evaluate_eps']
+    
+    model_path = config['inference_model_path']
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model file not found: {model_path}")
+    
+    policy_net, env, n_actions = load_model(model_path, env_name, device)
+    run_inference(policy_net, env, n_actions, device, evaluate_eps, 
+                  num_episodes=10, record_video=True)
+
 if __name__ == "__main__":
-    model_path = "path_to_your_model.pth"  # 替换为您的模型路径
-    policy_net, env, n_actions = load_model(model_path)
-    run_inference(policy_net, env, n_actions, record_video=True)
+    main()

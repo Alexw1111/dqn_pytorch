@@ -11,7 +11,7 @@ eps_start: 1.0        # epsilon-贪婪策略的初始探索率
 eps_end: 0.1          # epsilon-贪婪策略的最终探索率
 eps_decay: 1000000    # epsilon衰减的步数
 target_update: 10000  # 目标网络更新频率
-num_steps: 50000000   # 总训练步数
+num_steps: 50000   # 总训练步数
 memory_size: 1000000  # 经验回放缓存大小
 policy_update: 4      # 策略网络更新频率
 evaluate_freq: 200000 # 评估频率
@@ -26,4 +26,6 @@ evaluate_num_episodes: 15  # 评估时的游戏局数
 
 seed: 42         # 随机种子
 save_dir: checkpoints  # 模型保存目录
+save_frequency: 50000  # 保存检查点的频率（步数）
 log_dir: logs          # TensorBoard日志目录
+inference_model_path: 'checkpoints\Breakout_final_model.pth'  # 要推理的文件的路径
