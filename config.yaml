@@ -11,7 +11,7 @@ eps_start: 1.0        # epsilon-贪婪策略的初始探索率
 eps_end: 0.1          # epsilon-贪婪策略的最终探索率
 eps_decay: 1000000    # epsilon衰减的步数
 target_update: 10000  # 目标网络更新频率
-num_steps: 50000   # 总训练步数
+num_steps: 5000000   # 总训练步数
 memory_size: 1000000  # 经验回放缓存大小
 policy_update: 4      # 策略网络更新频率
 evaluate_freq: 200000 # 评估频率
