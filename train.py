@@ -1,6 +1,7 @@
 import os
 import random
 from typing import Dict, Any, Tuple
+import logging
 
 import numpy as np
 import torch
@@ -12,8 +13,24 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from torch.cuda.amp import GradScaler, autocast
 
+import matplotlib.pyplot as plt
+import seaborn as sns
+from collections import deque
+
 import model as m
 from atari_wrappers import wrap_deepmind, make_atari
+
+def setup_logging(log_dir: str) -> None:
+    """Set up logging configuration."""
+    os.makedirs(log_dir, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(os.path.join(log_dir, 'training.log')),
+            logging.StreamHandler()
+        ]
+    )
 
 def load_config(config_path: str) -> Dict[str, Any]:
     """Load configuration from a YAML file."""
@@ -34,9 +51,16 @@ def initialize_networks(observation_shape: Tuple[int, ...], n_actions: int, devi
     target_net.eval()
     return policy_net, target_net
 
-def optimize_model(policy_net: m.DQN, target_net: m.DQN, optimizer: optim.Optimizer, 
-                   memory: m.PrioritizedReplayMemory, batch_size: int, gamma: float, 
-                   device: torch.device, scaler: GradScaler) -> float:
+def optimize_model(
+    policy_net: m.DQN,
+    target_net: m.DQN,
+    optimizer: optim.Optimizer,
+    memory: m.PrioritizedReplayMemory,
+    batch_size: int,
+    gamma: float,
+    device: torch.device,
+    scaler: GradScaler
+) -> float:
     """Perform one step of optimization on the DQN."""
     if len(memory) < batch_size:
         return None
@@ -77,9 +101,94 @@ def optimize_model(policy_net: m.DQN, target_net: m.DQN, optimizer: optim.Optimi
 
     return loss.item()
 
-def main():
+def evaluate(policy_net: m.DQN, env: Any, device: torch.device, n_episodes: int = 10) -> Dict[str, float]:
+    """Evaluate the policy network."""
+    policy_net.eval()
+    rewards = []
+    episode_lengths = []
+    success_count = 0
+
+    for _ in range(n_episodes):
+        obs, _ = env.reset()
+        episode_reward = 0
+        episode_length = 0
+        done = False
+
+        while not done:
+            state = m.fp(np.array(obs)).to(device)
+            with torch.no_grad():
+                action = policy_net(state).max(1)[1].view(1, 1)
+            obs, reward, terminated, truncated, _ = env.step(action.item())
+            done = terminated or truncated
+            episode_reward += reward
+            episode_length += 1
+
+        rewards.append(episode_reward)
+        episode_lengths.append(episode_length)
+        if episode_reward > 0:  # Define your own success criterion
+            success_count += 1
+
+    policy_net.train()
+    return {
+        'mean_reward': np.mean(rewards),
+        'max_reward': np.max(rewards),
+        'min_reward': np.min(rewards),
+        'mean_episode_length': np.mean(episode_lengths),
+        'success_rate': success_count / n_episodes
+    }
+
+def visualize_q_values(writer: SummaryWriter, policy_net: m.DQN, obs: torch.Tensor, step: int) -> None:
+    """Visualize Q-values distribution."""
+    with torch.no_grad():
+        q_values = policy_net(obs).cpu().numpy()
+
+    plt.figure(figsize=(10, 6))
+    sns.boxplot(data=q_values)
+    plt.title('Q-values Distribution')
+    plt.ylabel('Q-value')
+    plt.xlabel('Action')
+    writer.add_figure('Q-values Distribution', plt.gcf(), global_step=step)
+    plt.close()
+
+def visualize_attention(writer: SummaryWriter, policy_net: m.DQN, obs: torch.Tensor, step: int) -> None:
+    """Visualize attention (activation) of the last convolutional layer."""
+    policy_net.eval()
+    
+    if obs.dim() == 5:
+        obs = obs.squeeze(1)  # Remove extra dimension if present
+    
+    activation = {}
+    def get_activation(name):
+        def hook(model, input, output):
+            activation[name] = output.detach()
+        return hook
+
+    policy_net.conv3.register_forward_hook(get_activation('conv3'))
+    with torch.no_grad():
+        policy_net(obs)
+
+    act = activation['conv3'].squeeze().sum(dim=0).cpu().numpy()
+    
+    plt.figure(figsize=(10, 6))
+    sns.heatmap(act, cmap='viridis')
+    plt.title('Attention Heatmap')
+    writer.add_figure('Attention Heatmap', plt.gcf(), global_step=step)
+    plt.close()
+
+    policy_net.train()
+
+def save_checkpoint(state: Dict[str, Any], is_best: bool, filename: str, best_filename: str) -> None:
+    """Save model checkpoint."""
+    torch.save(state, filename)
+    if is_best:
+        torch.save(state, best_filename)
+        logging.info(f"Saved new best model to {best_filename}")
+
+def main() -> None:
     """Main training loop."""
     config = load_config('config.yaml')
+    setup_logging(config['log_dir'])
+    
     device = torch.device(config['device'])
     env = setup_environment(config['env_name'])
 
@@ -90,54 +199,115 @@ def main():
 
     policy_net, target_net = initialize_networks(observation_shape, n_actions, device)
     optimizer = optim.Adam(policy_net.parameters(), lr=config['lr'], eps=config['adam_eps'])
-    memory = m.PrioritizedReplayMemory(config['memory_size'])
+    memory = m.PrioritizedReplayMemory(config['memory_size'], 
+                                       alpha=config['prioritized_replay_alpha'], 
+                                       beta_start=config['prioritized_replay_beta'], 
+                                       beta_frames=config['prioritized_replay_beta_frames'])
     action_selector = m.ActionSelector(config['eps_start'], config['eps_end'], 
                                        policy_net, config['eps_decay'], n_actions, device)
 
     writer = SummaryWriter(log_dir=config['log_dir'])
     os.makedirs(config['save_dir'], exist_ok=True)
 
-    scaler = GradScaler()
+    scaler = GradScaler(enabled=config['use_mixed_precision'])
 
     obs = m.fp(np.array(env.reset()[0])).to(device)
     episode_reward = 0
+    episode_rewards = deque(maxlen=100)  # Store last 100 episode rewards
+    best_eval_reward = float('-inf')
 
-    for step in tqdm(range(config['num_steps']), total=config['num_steps'], ncols=50, leave=False, unit='b'):
-        action, eps = action_selector.select_action(obs, train=True)
-        next_obs, reward, terminated, truncated, _ = env.step(action.item())
-        done = terminated or truncated
-        reward = torch.tensor([reward], device=device)
+    try:
+        progress_bar = tqdm(range(config['num_steps']), desc="Training", ncols=100)
+        for step in progress_bar:
+            action, eps = action_selector.select_action(obs, train=True)
+            next_obs, reward, terminated, truncated, _ = env.step(action.item())
+            done = terminated or truncated
+            reward = torch.tensor([reward], device=device)
 
-        next_state = m.fp(np.array(next_obs)).to(device) if not done else None
-        memory.push(obs, action, next_state, reward, done)
+            next_state = m.fp(np.array(next_obs)).to(device) if not done else None
+            memory.push(obs.cpu(), action.cpu(), next_state.cpu() if next_state is not None else None, reward.cpu(), done)
 
-        obs = next_state if next_state is not None else m.fp(np.array(env.reset()[0])).to(device)
+            obs = next_state if next_state is not None else m.fp(np.array(env.reset()[0])).to(device)
 
-        episode_reward += reward.item()
+            episode_reward += reward.item()
 
-        if step % config['policy_update'] == 0:
-            loss = optimize_model(policy_net, target_net, optimizer, memory, 
-                                  config['batch_size'], config['gamma'], device, scaler)
-            if loss is not None:
-                writer.add_scalar('Loss/train', loss, global_step=step)
+            if step % config['policy_update'] == 0:
+                loss = optimize_model(policy_net, target_net, optimizer, memory, 
+                                      config['batch_size'], config['gamma'], device, scaler)
+                if loss is not None:
+                    writer.add_scalar('Loss/train', loss, global_step=step)
 
-        if step % config['target_update'] == 0:
-            target_net.load_state_dict(policy_net.state_dict())
+            if step % config['target_update'] == 0:
+                target_net.load_state_dict(policy_net.state_dict())
 
-        if done:
-            writer.add_scalar('Reward/train', episode_reward, global_step=step)
-            writer.add_scalar('Epsilon', eps, global_step=step)
-            episode_reward = 0
+            if done:
+                episode_rewards.append(episode_reward)
+                avg_reward = np.mean(episode_rewards)
+                writer.add_scalar('Reward/train', episode_reward, global_step=step)
+                writer.add_scalar('Reward/average', avg_reward, global_step=step)
+                writer.add_scalar('Epsilon', eps, global_step=step)
+                
+                # Update progress bar description
+                progress_bar.set_postfix({
+                    'Reward': f'{episode_reward:.2f}',
+                    'Avg Reward': f'{avg_reward:.2f}',
+                    'Epsilon': f'{eps:.2f}'
+                })
+                
+                episode_reward = 0
 
-        if (step + 1) % config['save_frequency'] == 0:
-            torch.save({
-                'step': step + 1,
-                'policy_net_state_dict': policy_net.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-            }, os.path.join(config['save_dir'], f'{config["env_name"]}_checkpoint_step_{step+1}.pth'))
+            if (step + 1) % config['evaluate_freq'] == 0:
+                eval_metrics = evaluate(policy_net, env, device, config['evaluate_num_episodes'])
+                for metric_name, metric_value in eval_metrics.items():
+                    writer.add_scalar(f'Eval/{metric_name}', metric_value, global_step=step)
+                
+                current_eval_reward = eval_metrics['mean_reward']
+                is_best = current_eval_reward > best_eval_reward
+                best_eval_reward = max(best_eval_reward, current_eval_reward)
 
-    writer.close()
-    print("Training completed.")
+                visualize_q_values(writer, policy_net, obs, step)
+                visualize_attention(writer, policy_net, obs, step)
+
+                # Save checkpoint
+                checkpoint = {
+                    'step': step + 1,
+                    'policy_net_state_dict': policy_net.state_dict(),
+                    'target_net_state_dict': target_net.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'best_eval_reward': best_eval_reward,
+                    'config': config,
+                }
+                save_checkpoint(
+                    checkpoint,
+                    is_best,
+                    os.path.join(config['save_dir'], f'{config["env_name"]}_checkpoint_step_{step+1}.pth'),
+                    os.path.join(config['save_dir'], f'{config["env_name"]}_best_model.pth')
+                )
+
+            # Learning rate decay
+            if (step + 1) % 100000 == 0:
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] *= config['learning_rate_decay']
+                    writer.add_scalar('Learning_rate', param_group['lr'], global_step=step)
+
+    except KeyboardInterrupt:
+        logging.info("Training interrupted by user. Saving final model...")
+    finally:
+        # Save final model
+        final_checkpoint = {
+            'step': config['num_steps'],
+            'policy_net_state_dict': policy_net.state_dict(),
+            'target_net_state_dict': target_net.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'best_eval_reward': best_eval_reward,
+            'config': config,
+        }
+        final_model_path = os.path.join(config['save_dir'], f'{config["env_name"]}_final_model.pth')
+        torch.save(final_checkpoint, final_model_path)
+        logging.info(f"Training completed. Final model saved to {final_model_path}")
+
+        writer.close()
+        print("Training completed.")
 
 if __name__ == "__main__":
     main()

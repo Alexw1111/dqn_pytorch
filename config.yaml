@@ -5,7 +5,7 @@ device: cuda
 env_name: Breakout  # 可选: 'Breakout', 'SpaceInvaders', 'Riverraid', 'Seaquest', 'MontezumaRevenge'
 
 # 训练设置
-batch_size: 128       # 批次大小
+batch_size: 32       # 批次大小
 gamma: 0.99           # 折扣因子
 eps_start: 1.0        # epsilon-贪婪策略的初始探索率
 eps_end: 0.01         # 稍微降低最终探索率，以增加利用率
@@ -21,13 +21,15 @@ adam_eps: 1.0e-8      # Adam优化器的epsilon值
 # 评估设置
 evaluate_eps: 0.05         # 评估时的探索率
 evaluate_num_episodes: 20  # 评估时的游戏局数
+evaluate_freq: 10000  # 评估频率
+evaluate_episodes: 10  # 每次评估的回合数
 
 # 其他设置
 seed: 42         # 随机种子
 save_dir: checkpoints  # 模型保存目录
-save_frequency: 100000  # 增加保存检查点的频率
+save_frequency: 1000000   # 保存检查点的频率
 log_dir: logs          # TensorBoard日志目录
-inference_model_path: 'checkpoints/Breakout_best_model.pth'  # 推理模型路径请修改
+inference_model_path: 'checkpoints\Breakout_final_model.pth'  # 推理模型路径请修改
 
 use_mixed_precision: true  # 启用混合精度训练
 learning_rate_decay: 0.99  # 每 100000 步衰减学习率
