@@ -17,6 +17,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from collections import deque
 
+import gc
+import psutil
+
 import model as m
 from atari_wrappers import wrap_deepmind, make_atari
 
@@ -71,132 +74,57 @@ def optimize_model(
     batch_size: int,
     gamma: float,
     device: torch.device,
-    scaler: GradScaler
+    scaler: GradScaler,
+    gradient_accumulation_steps: int
 ) -> float:
-    """Perform one step of optimization on the DQN."""
     if len(memory) < batch_size:
         return None
 
-    transitions, idxs, is_weights = memory.sample(batch_size)
-    batch = m.Transition(*zip(*transitions))
+    total_loss = 0
+    for _ in range(gradient_accumulation_steps):
+        transitions, idxs, is_weights = memory.sample(batch_size // gradient_accumulation_steps)
+        batch = m.Transition(*zip(*transitions))
 
-    non_final_mask = torch.tensor(tuple(map(lambda s: s is not None, batch.next_state)), 
-                                  device=device, dtype=torch.bool)
-    non_final_next_states = torch.cat([s for s in batch.next_state if s is not None]).to(device)
-    
-    state_batch = torch.cat(batch.state).to(device)
-    action_batch = torch.cat(batch.action).to(device)
-    reward_batch = torch.cat(batch.reward).to(device)
+        non_final_mask = torch.tensor(tuple(map(lambda s: s is not None, batch.next_state)), 
+                                      device=device, dtype=torch.bool)
+        non_final_next_states = torch.cat([s for s in batch.next_state if s is not None]).to(device)
+        
+        state_batch = torch.cat(batch.state).to(device)
+        action_batch = torch.cat(batch.action).to(device)
+        reward_batch = torch.cat(batch.reward).to(device)
 
-    with autocast():
-        state_action_values = policy_net(state_batch).gather(1, action_batch)
+        with autocast():
+            state_action_values = policy_net(state_batch).gather(1, action_batch)
 
-        next_state_values = torch.zeros(batch_size, device=device)
+            next_state_values = torch.zeros(batch_size // gradient_accumulation_steps, device=device)
+            with torch.no_grad():
+                next_state_values[non_final_mask] = target_net(non_final_next_states).max(1)[0].detach()
+            expected_state_action_values = (next_state_values * gamma) + reward_batch
+
+            loss = (F.smooth_l1_loss(state_action_values, expected_state_action_values.unsqueeze(1), reduction='none') * torch.tensor(is_weights, device=device)).mean()
+            loss = loss / gradient_accumulation_steps
+
+        scaler.scale(loss).backward()
+        total_loss += loss.item()
+
         with torch.no_grad():
-            next_state_values[non_final_mask] = target_net(non_final_next_states).max(1)[0].to(torch.float32)
-        expected_state_action_values = (next_state_values * gamma) + reward_batch
+            td_errors = torch.abs(state_action_values - expected_state_action_values.unsqueeze(1)).detach().cpu().numpy()
+        new_priorities = td_errors + 1e-6
+        memory.update_priorities(idxs, new_priorities)
 
-        loss = (F.smooth_l1_loss(state_action_values, expected_state_action_values.unsqueeze(1), reduction='none') * torch.tensor(is_weights, device=device)).mean()
+        # 清理不需要的张量
+        del state_batch, action_batch, reward_batch, non_final_next_states, state_action_values, next_state_values, expected_state_action_values
+        torch.cuda.empty_cache()
 
-    optimizer.zero_grad()
-    scaler.scale(loss).backward()
     scaler.unscale_(optimizer)
     torch.nn.utils.clip_grad_norm_(policy_net.parameters(), max_norm=100)
     scaler.step(optimizer)
     scaler.update()
+    optimizer.zero_grad(set_to_none=True)
 
-    with torch.no_grad():
-        td_errors = torch.abs(state_action_values.float() - expected_state_action_values.unsqueeze(1)).detach().cpu().numpy()
-    new_priorities = td_errors + 1e-6  # small constant to ensure non-zero priority
-    memory.update_priorities(idxs, new_priorities)
-
-    return loss.item()
-
-def evaluate(policy_net: nn.Module, env: Any, device: torch.device, n_episodes: int = 10) -> Dict[str, float]:
-    """Evaluate the policy network."""
-    policy_net.eval()
-    rewards = []
-    episode_lengths = []
-    success_count = 0
-
-    for _ in range(n_episodes):
-        obs, _ = env.reset()
-        episode_reward = 0
-        episode_length = 0
-        done = False
-
-        while not done:
-            state = m.fp(np.array(obs)).to(device)
-            with torch.no_grad():
-                action = policy_net(state).max(1)[1].view(1, 1)
-            obs, reward, terminated, truncated, _ = env.step(action.item())
-            done = terminated or truncated
-            episode_reward += reward
-            episode_length += 1
-
-        rewards.append(episode_reward)
-        episode_lengths.append(episode_length)
-        if episode_reward > 0:  # Define your own success criterion
-            success_count += 1
-
-    policy_net.train()
-    return {
-        'mean_reward': np.mean(rewards),
-        'max_reward': np.max(rewards),
-        'min_reward': np.min(rewards),
-        'mean_episode_length': np.mean(episode_lengths),
-        'success_rate': success_count / n_episodes
-    }
-
-def visualize_q_values(writer: SummaryWriter, policy_net: nn.Module, obs: torch.Tensor, step: int) -> None:
-    """Visualize Q-values distribution."""
-    with torch.no_grad():
-        q_values = policy_net(obs).cpu().numpy()
-
-    plt.figure(figsize=(10, 6))
-    sns.boxplot(data=q_values)
-    plt.title('Q-values Distribution')
-    plt.ylabel('Q-value')
-    plt.xlabel('Action')
-    writer.add_figure('Q-values Distribution', plt.gcf(), global_step=step)
-    plt.close()
-
-def visualize_attention(writer: SummaryWriter, policy_net: nn.Module, obs: torch.Tensor, step: int) -> None:
-    """Visualize attention (activation) of the last convolutional layer."""
-    policy_net.eval()
-    
-    if obs.dim() == 5:
-        obs = obs.squeeze(1)  # Remove extra dimension if present
-    
-    activation = {}
-    def get_activation(name):
-        def hook(model, input, output):
-            activation[name] = output.detach()
-        return hook
-
-    policy_net.conv3.register_forward_hook(get_activation('conv3'))
-    with torch.no_grad():
-        policy_net(obs)
-
-    act = activation['conv3'].squeeze().sum(dim=0).cpu().numpy()
-    
-    plt.figure(figsize=(10, 6))
-    sns.heatmap(act, cmap='viridis')
-    plt.title('Attention Heatmap')
-    writer.add_figure('Attention Heatmap', plt.gcf(), global_step=step)
-    plt.close()
-
-    policy_net.train()
-
-def save_checkpoint(state: Dict[str, Any], is_best: bool, filename: str, best_filename: str) -> None:
-    """Save model checkpoint."""
-    torch.save(state, filename)
-    if is_best:
-        torch.save(state, best_filename)
-        logging.info(f"Saved new best model to {best_filename}")
+    return total_loss
 
 def main() -> None:
-    """Main training loop."""
     config = load_config('config.yaml')
     setup_logging(config['log_dir'])
     
@@ -234,7 +162,7 @@ def main() -> None:
 
     obs = m.fp(np.array(env.reset()[0])).to(device)
     episode_reward = 0
-    episode_rewards = deque(maxlen=100)  # Store last 100 episode rewards
+    episode_rewards = deque(maxlen=100)
     best_eval_reward = float('-inf')
 
     try:
@@ -254,7 +182,8 @@ def main() -> None:
 
             if step % config['policy_update'] == 0:
                 loss = optimize_model(policy_net, target_net, optimizer, memory, 
-                                      config['batch_size'], config['gamma'], device, scaler)
+                                      config['batch_size'], config['gamma'], device, scaler,
+                                      config['gradient_accumulation_steps'])
                 if loss is not None:
                     writer.add_scalar('Loss/train', loss, global_step=step)
 
@@ -268,7 +197,6 @@ def main() -> None:
                 writer.add_scalar('Reward/average', avg_reward, global_step=step)
                 writer.add_scalar('Epsilon', eps, global_step=step)
                 
-                # Update progress bar description
                 progress_bar.set_postfix({
                     'Reward': f'{episode_reward:.2f}',
                     'Avg Reward': f'{avg_reward:.2f}',
@@ -290,7 +218,6 @@ def main() -> None:
                 visualize_q_values(writer, policy_net.module if isinstance(policy_net, nn.DataParallel) else policy_net, obs, step)
                 visualize_attention(writer, policy_net.module if isinstance(policy_net, nn.DataParallel) else policy_net, obs, step)
 
-                # Save checkpoint
                 checkpoint = {
                     'step': step + 1,
                     'policy_net_state_dict': policy_net.state_dict(),
@@ -306,16 +233,23 @@ def main() -> None:
                     os.path.join(config['save_dir'], f'{config["env_name"]}_best_model.pth')
                 )
 
-            # Learning rate decay
             if (step + 1) % 100000 == 0:
                 for param_group in optimizer.param_groups:
                     param_group['lr'] *= config['learning_rate_decay']
                     writer.add_scalar('Learning_rate', param_group['lr'], global_step=step)
 
+            # 定期进行垃圾回收和内存监控
+            if step % 1000 == 0:
+                gc.collect()
+                torch.cuda.empty_cache()
+                process = psutil.Process(os.getpid())
+                memory_info = process.memory_info()
+                writer.add_scalar('Memory/RSS', memory_info.rss / 1e6, global_step=step)  # RSS in MB
+                writer.add_scalar('Memory/VMS', memory_info.vms / 1e6, global_step=step)  # VMS in MB
+
     except KeyboardInterrupt:
         logging.info("Training interrupted by user. Saving final model...")
     finally:
-        # Save final model
         final_checkpoint = {
             'step': config['num_steps'],
             'policy_net_state_dict': policy_net.state_dict(),

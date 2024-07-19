@@ -11,7 +11,7 @@ eps_end: 0.01
 eps_decay: 1000000
 target_update: 10000
 num_steps: 5000000
-memory_size: 1000000
+memory_size: 100000 
 policy_update: 4
 evaluate_freq: 250000
 lr: 0.0000625
