@@ -21,6 +21,7 @@ evaluate_eps: 0.05
 evaluate_num_episodes: 20
 evaluate_freq: 10000
 evaluate_episodes: 10
+gradient_accumulation_steps: 8
 
 seed: 42
 save_dir: checkpoints
