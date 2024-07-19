@@ -1,31 +1,50 @@
-# 设备选择: 'cuda' 或 'cpu'
-device: cuda
+# 设备选择
+device: cpu  # 可以是 'cuda' 或 'cpu'
+#gpus: [0, 1]  # 指定要使用的GPU ID列表, 如果device是'cuda'
 
 # 环境设置
-env_name: Breakout  # 可选: 'Breakout', 'SpaceInvaders', 'Riverraid', 'Seaquest', 'MontezumaRevenge'
+env_name: BreakoutNoFrameskip-v4
 
-# 训练设置
-batch_size: 32        # 批次大小
-gamma: 0.99           # 折扣因子
-eps_start: 1.0        # epsilon-贪婪策略的初始探索率
-eps_end: 0.1          # epsilon-贪婪策略的最终探索率
-eps_decay: 1000000    # epsilon衰减的步数
-target_update: 10000  # 目标网络更新频率
-num_steps: 5000000   # 总训练步数
-memory_size: 1000000  # 经验回放缓存大小
-policy_update: 4      # 策略网络更新频率
-evaluate_freq: 200000 # 评估频率
-lr: 0.0000625         # 学习率
-adam_eps: 1.0e-8      # Adam优化器的epsilon值
+# Rainbow DQN 特定参数
+atom_size: 51
+v_min: -10
+v_max: 10
 
-# 评估设置
-evaluate_eps: 0.05         # 评估时的探索率
-evaluate_num_episodes: 15  # 评估时的游戏局数
+# 训练参数
+batch_size: 124
+gamma: 0.99
+eps_start: 1.0
+eps_end: 0.01
+eps_decay: 1000000
+target_update: 10000
+num_steps: 5000000
+memory_size: 100000 
+policy_update: 4
+evaluate_freq: 250000
+lr: 0.0000625
+adam_eps: 1.5e-4
+gradient_accumulation_steps: 8  
+
+# 评估参数
+evaluate_eps: 0.05
+evaluate_num_episodes: 20
+evaluate_freq: 10000
+evaluate_episodes: 10
+
+# 课程学习参数
+curriculum_thresholds: [50, 100, 150]
 
 # 其他设置
+seed: 42
+save_dir: checkpoints
+save_frequency: 1000000
+log_dir: logs
+inference_model_path: 'checkpoints/BreakoutNoFrameskip-v4_best_model.pth'
 
-seed: 42         # 随机种子
-save_dir: checkpoints  # 模型保存目录
-save_frequency: 50000  # 保存检查点的频率（步数）
-log_dir: logs          # TensorBoard日志目录
-inference_model_path: 'checkpoints\Breakout_final_model.pth'  # 要推理的文件的路径
+use_mixed_precision: true
+learning_rate_decay: 0.99
+
+# 优先经验回放参数
+prioritized_replay_alpha: 0.6
+prioritized_replay_beta: 0.4
+prioritized_replay_beta_frames: 100000
