@@ -42,18 +42,30 @@ def setup_environment(env_name: str) -> Any:
     env_raw = make_atari(f'{env_name}NoFrameskip-v4')
     return wrap_deepmind(env_raw, frame_stack=True, episode_life=True, clip_rewards=True)
 
-def initialize_networks(observation_shape: Tuple[int, ...], n_actions: int, device: torch.device) -> Tuple[m.DQN, m.DQN]:
+def initialize_networks(observation_shape: Tuple[int, ...], n_actions: int, config: Dict[str, Any]) -> Tuple[nn.Module, nn.Module]:
     """Initialize the policy and target networks."""
-    policy_net = m.DQN(observation_shape[2], observation_shape[3], n_actions).to(device)
-    target_net = m.DQN(observation_shape[2], observation_shape[3], n_actions).to(device)
+    policy_net = m.DQN(observation_shape[2], observation_shape[3], n_actions)
+    target_net = m.DQN(observation_shape[2], observation_shape[3], n_actions)
     policy_net.apply(policy_net.init_weights)
     target_net.load_state_dict(policy_net.state_dict())
+    
+    if config['device'] == 'cuda' and torch.cuda.is_available():
+        if len(config['gpus']) > 1:
+            policy_net = nn.DataParallel(policy_net, device_ids=config['gpus'])
+            target_net = nn.DataParallel(target_net, device_ids=config['gpus'])
+            print(f"Using GPUs: {config['gpus']}")
+        policy_net = policy_net.to(config['device'])
+        target_net = target_net.to(config['device'])
+    else:
+        policy_net = policy_net.to(config['device'])
+        target_net = target_net.to(config['device'])
+    
     target_net.eval()
     return policy_net, target_net
 
 def optimize_model(
-    policy_net: m.DQN,
-    target_net: m.DQN,
+    policy_net: nn.Module,
+    target_net: nn.Module,
     optimizer: optim.Optimizer,
     memory: m.PrioritizedReplayMemory,
     batch_size: int,
@@ -93,7 +105,6 @@ def optimize_model(
     scaler.step(optimizer)
     scaler.update()
 
-    # Update priorities
     with torch.no_grad():
         td_errors = torch.abs(state_action_values.float() - expected_state_action_values.unsqueeze(1)).detach().cpu().numpy()
     new_priorities = td_errors + 1e-6  # small constant to ensure non-zero priority
@@ -101,7 +112,7 @@ def optimize_model(
 
     return loss.item()
 
-def evaluate(policy_net: m.DQN, env: Any, device: torch.device, n_episodes: int = 10) -> Dict[str, float]:
+def evaluate(policy_net: nn.Module, env: Any, device: torch.device, n_episodes: int = 10) -> Dict[str, float]:
     """Evaluate the policy network."""
     policy_net.eval()
     rewards = []
@@ -137,7 +148,7 @@ def evaluate(policy_net: m.DQN, env: Any, device: torch.device, n_episodes: int 
         'success_rate': success_count / n_episodes
     }
 
-def visualize_q_values(writer: SummaryWriter, policy_net: m.DQN, obs: torch.Tensor, step: int) -> None:
+def visualize_q_values(writer: SummaryWriter, policy_net: nn.Module, obs: torch.Tensor, step: int) -> None:
     """Visualize Q-values distribution."""
     with torch.no_grad():
         q_values = policy_net(obs).cpu().numpy()
@@ -150,7 +161,7 @@ def visualize_q_values(writer: SummaryWriter, policy_net: m.DQN, obs: torch.Tens
     writer.add_figure('Q-values Distribution', plt.gcf(), global_step=step)
     plt.close()
 
-def visualize_attention(writer: SummaryWriter, policy_net: m.DQN, obs: torch.Tensor, step: int) -> None:
+def visualize_attention(writer: SummaryWriter, policy_net: nn.Module, obs: torch.Tensor, step: int) -> None:
     """Visualize attention (activation) of the last convolutional layer."""
     policy_net.eval()
     
@@ -189,7 +200,16 @@ def main() -> None:
     config = load_config('config.yaml')
     setup_logging(config['log_dir'])
     
-    device = torch.device(config['device'])
+    if config['device'] == 'cuda' and torch.cuda.is_available():
+        if not config['gpus']:
+            config['gpus'] = list(range(torch.cuda.device_count()))
+        os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(map(str, config['gpus']))
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+    
+    config['device'] = device
+    
     env = setup_environment(config['env_name'])
 
     obs, _ = env.reset()
@@ -197,14 +217,15 @@ def main() -> None:
     observation_shape = obs.shape
     n_actions = env.action_space.n
 
-    policy_net, target_net = initialize_networks(observation_shape, n_actions, device)
+    policy_net, target_net = initialize_networks(observation_shape, n_actions, config)
     optimizer = optim.Adam(policy_net.parameters(), lr=config['lr'], eps=config['adam_eps'])
     memory = m.PrioritizedReplayMemory(config['memory_size'], 
                                        alpha=config['prioritized_replay_alpha'], 
                                        beta_start=config['prioritized_replay_beta'], 
                                        beta_frames=config['prioritized_replay_beta_frames'])
     action_selector = m.ActionSelector(config['eps_start'], config['eps_end'], 
-                                       policy_net, config['eps_decay'], n_actions, device)
+                                       policy_net.module if isinstance(policy_net, nn.DataParallel) else policy_net, 
+                                       config['eps_decay'], n_actions, device)
 
     writer = SummaryWriter(log_dir=config['log_dir'])
     os.makedirs(config['save_dir'], exist_ok=True)
@@ -257,7 +278,8 @@ def main() -> None:
                 episode_reward = 0
 
             if (step + 1) % config['evaluate_freq'] == 0:
-                eval_metrics = evaluate(policy_net, env, device, config['evaluate_num_episodes'])
+                eval_metrics = evaluate(policy_net.module if isinstance(policy_net, nn.DataParallel) else policy_net, 
+                                        env, device, config['evaluate_num_episodes'])
                 for metric_name, metric_value in eval_metrics.items():
                     writer.add_scalar(f'Eval/{metric_name}', metric_value, global_step=step)
                 
@@ -265,8 +287,8 @@ def main() -> None:
                 is_best = current_eval_reward > best_eval_reward
                 best_eval_reward = max(best_eval_reward, current_eval_reward)
 
-                visualize_q_values(writer, policy_net, obs, step)
-                visualize_attention(writer, policy_net, obs, step)
+                visualize_q_values(writer, policy_net.module if isinstance(policy_net, nn.DataParallel) else policy_net, obs, step)
+                visualize_attention(writer, policy_net.module if isinstance(policy_net, nn.DataParallel) else policy_net, obs, step)
 
                 # Save checkpoint
                 checkpoint = {
