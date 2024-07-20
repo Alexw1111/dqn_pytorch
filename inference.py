@@ -1,7 +1,7 @@
 """
-Inference script for trained DQN model on Atari games.
+Inference script for trained Rainbow DQN model on Atari games.
 
-This script loads a trained DQN model and runs it on the specified Atari environment,
+This script loads a trained Rainbow DQN model and runs it on the specified Atari environment,
 optionally recording videos of the gameplay.
 """
 
@@ -52,7 +52,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
         logging.error(f"Error parsing configuration file: {e}")
         raise
 
-def load_model(model_path: str, env_name: str, device: str) -> Tuple[m.DQN, Any, int]:
+def load_model(model_path: str, env_name: str, device: str, config: Dict[str, Any]) -> Tuple[m.RainbowDQN, Any, int]:
     """
     Load the trained model and set up the environment.
 
@@ -60,9 +60,10 @@ def load_model(model_path: str, env_name: str, device: str) -> Tuple[m.DQN, Any,
         model_path (str): Path to the saved model checkpoint.
         env_name (str): Name of the Atari environment.
         device (str): Device to load the model on ('cpu' or 'cuda').
+        config (Dict[str, Any]): Configuration dictionary.
 
     Returns:
-        Tuple[m.DQN, Any, int]: Loaded policy network, environment, and number of actions.
+        Tuple[m.RainbowDQN, Any, int]: Loaded policy network, environment, and number of actions.
 
     Raises:
         FileNotFoundError: If the model file is not found.
@@ -71,7 +72,7 @@ def load_model(model_path: str, env_name: str, device: str) -> Tuple[m.DQN, Any,
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model file not found: {model_path}")
 
-    env_raw = make_atari(f'{env_name}NoFrameskip-v4')
+    env_raw = make_atari(env_name)
     env = wrap_deepmind(env_raw, frame_stack=True, episode_life=False, clip_rewards=False)
     
     obs, _ = env.reset()
@@ -79,7 +80,11 @@ def load_model(model_path: str, env_name: str, device: str) -> Tuple[m.DQN, Any,
     c, h, w = obs.shape[1], obs.shape[2], obs.shape[3]
     n_actions = env.action_space.n
     
-    policy_net = m.DQN(h, w, n_actions).to(device)
+    v_min, v_max = config['v_min'], config['v_max']
+    atom_size = config['atom_size']
+    support = torch.linspace(v_min, v_max, atom_size).to(device)
+    
+    policy_net = m.RainbowDQN(h, w, n_actions, atom_size, support).to(device)
     
     try:
         checkpoint = torch.load(model_path, map_location=device)
@@ -95,11 +100,12 @@ def load_model(model_path: str, env_name: str, device: str) -> Tuple[m.DQN, Any,
     return policy_net, env, n_actions
 
 def run_inference(
-    policy_net: m.DQN,
+    policy_net: m.RainbowDQN,
     env: Any,
     n_actions: int,
     device: str,
     evaluate_eps: float,
+    support: torch.Tensor,
     num_episodes: int = 10,
     record_video: bool = True
 ) -> None:
@@ -107,15 +113,16 @@ def run_inference(
     Run the trained model on the environment and optionally record videos.
 
     Args:
-        policy_net (m.DQN): Trained policy network.
+        policy_net (m.RainbowDQN): Trained policy network.
         env (Any): Atari environment.
         n_actions (int): Number of possible actions.
         device (str): Device to run inference on.
         evaluate_eps (float): Epsilon value for evaluation.
+        support (torch.Tensor): Support for the categorical DQN.
         num_episodes (int): Number of episodes to run.
         record_video (bool): Whether to record videos of gameplay.
     """
-    sa = m.ActionSelector(evaluate_eps, evaluate_eps, policy_net, 0, n_actions, device)
+    sa = m.ActionSelector(evaluate_eps, evaluate_eps, policy_net, 0, n_actions, device, support)
     
     if record_video:
         try:
@@ -160,8 +167,12 @@ def main() -> None:
         
         model_path = config['inference_model_path']
         
+        v_min, v_max = config['v_min'], config['v_max']
+        atom_size = config['atom_size']
+        support = torch.linspace(v_min, v_max, atom_size).to(device)
+        
         logging.info(f"Loading model from {model_path}")
-        policy_net, env, n_actions = load_model(model_path, env_name, device)
+        policy_net, env, n_actions = load_model(model_path, env_name, device, config)
         logging.info("Model loaded successfully")
         
         logging.info("Starting inference")
@@ -171,6 +182,7 @@ def main() -> None:
             n_actions,
             device,
             evaluate_eps,
+            support,
             num_episodes=10,
             record_video=True
         )
