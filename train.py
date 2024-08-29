@@ -14,18 +14,15 @@ import model as m
 from atari_wrappers import make_atari, wrap_deepmind
 
 def load_config(config_path: str) -> Dict[str, Any]:
-    """Load configuration from a YAML file."""
     with open(config_path, 'r', encoding='utf-8') as f:
         return yaml.safe_load(f)
 
 def setup_environment(env_name: str) -> Any:
-    """Set up the Atari environment."""
     env_raw = make_atari(f'{env_name}NoFrameskip-v4')
     return wrap_deepmind(env_raw, frame_stack=True, episode_life=True, clip_rewards=True)
 
 def initialize_networks(observation_shape: tuple, n_actions: int, device: torch.device) -> tuple:
-    """Initialize the policy and target networks."""
-    h, w = observation_shape[2], observation_shape[3]  # 假设 observation_shape 是 (batch, channel, height, width)
+    h, w = observation_shape[2], observation_shape[3]
     policy_net = m.DQN(h, w, n_actions).to(device)
     target_net = m.DQN(h, w, n_actions).to(device)
     policy_net.apply(policy_net.init_weights)
@@ -35,7 +32,6 @@ def initialize_networks(observation_shape: tuple, n_actions: int, device: torch.
 
 def optimize_model(policy_net: m.DQN, target_net: m.DQN, optimizer: optim.Optimizer, 
                    memory: m.ReplayMemory, batch_size: int, gamma: float, device: torch.device) -> float:
-    """Perform one step of optimization on the DQN."""
     if len(memory) < batch_size:
         return None
 
@@ -68,7 +64,6 @@ def optimize_model(policy_net: m.DQN, target_net: m.DQN, optimizer: optim.Optimi
 
 def evaluate(policy_net: m.DQN, env: Any, action_selector: m.ActionSelector, device: torch.device, 
              num_episodes: int) -> float:
-    """Evaluate the current policy network."""
     total_reward = 0
     for _ in range(num_episodes):
         obs, _ = env.reset()
@@ -87,7 +82,6 @@ def evaluate(policy_net: m.DQN, env: Any, action_selector: m.ActionSelector, dev
 
 def save_checkpoint(step: int, policy_net: m.DQN, optimizer: optim.Optimizer, 
                     best_eval_reward: float, save_path: str):
-    """Save a training checkpoint."""
     torch.save({
         'step': step,
         'policy_net_state_dict': policy_net.state_dict(),
@@ -96,8 +90,16 @@ def save_checkpoint(step: int, policy_net: m.DQN, optimizer: optim.Optimizer,
     }, save_path)
     print(f"Checkpoint saved at step {step}")
 
+def load_checkpoint(checkpoint_path: str, policy_net: m.DQN, optimizer: optim.Optimizer, device: torch.device):
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    policy_net.load_state_dict(checkpoint['policy_net_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    start_step = checkpoint['step']
+    best_eval_reward = checkpoint['best_eval_reward']
+    print(f"Loaded checkpoint from step {start_step}")
+    return start_step, best_eval_reward
+
 def main():
-    """Main training loop."""
     config = load_config('config.yaml')
     device = torch.device(config['device'])
     env = setup_environment(config['env_name'])
@@ -116,11 +118,17 @@ def main():
     writer = SummaryWriter(log_dir=config['log_dir'])
     os.makedirs(config['save_dir'], exist_ok=True)
 
+    start_step = 0
     best_eval_reward = float('-inf')
+
+    if config['resume_training']:
+        start_step, best_eval_reward = load_checkpoint(config['resume_model_path'], policy_net, optimizer, device)
+        target_net.load_state_dict(policy_net.state_dict())
+
     obs = m.fp(np.array(env.reset()[0]))
     episode_reward = 0
 
-    for step in tqdm(range(config['num_steps']), total=config['num_steps'], ncols=50, leave=False, unit='b'):
+    for step in tqdm(range(start_step, config['num_steps']), initial=start_step, total=config['num_steps'], ncols=50, leave=False, unit='b'):
         state = obs.to(device)
         action, eps = action_selector.select_action(state, train=True)
         next_obs, reward, terminated, truncated, _ = env.step(action.item())
@@ -161,7 +169,6 @@ def main():
             save_checkpoint(step + 1, policy_net, optimizer, best_eval_reward,
                             os.path.join(config['save_dir'], f'{config["env_name"]}_checkpoint_step_{step+1}.pth'))
 
-    # Save final model
     final_model_path = os.path.join(config['save_dir'], f'{config["env_name"]}_final_model.pth')
     torch.save(policy_net.state_dict(), final_model_path)
     print(f"Training completed. Final model saved to {final_model_path}")

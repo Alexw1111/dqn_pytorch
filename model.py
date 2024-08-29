@@ -7,7 +7,6 @@ from collections import namedtuple, deque
 from typing import List, Tuple
 import cv2
 
-# 定义经验回放的数据结构
 Transition = namedtuple('Transition',
                         ('state', 'action', 'next_state', 'reward', 'done'))
 
@@ -46,7 +45,6 @@ class ReplayMemory:
         self.memory = deque([], maxlen=capacity)
 
     def push(self, *args):
-        """Save a transition"""
         self.memory.append(Transition(*args))
 
     def sample(self, batch_size: int) -> List[Transition]:
@@ -78,7 +76,6 @@ class ActionSelector:
             return torch.tensor([[random.randrange(self._n_actions)]], device=self._device, dtype=torch.long), self._eps
 
 def fp(n_frame):
-    """Frame Processor"""
     if isinstance(n_frame, np.ndarray):
         return torch.from_numpy(n_frame).float().permute(2, 0, 1).unsqueeze(0)
     elif isinstance(n_frame, torch.Tensor):
@@ -86,7 +83,7 @@ def fp(n_frame):
             return n_frame.float().permute(2, 0, 1).unsqueeze(0)
         elif len(n_frame.shape) == 4:
             return n_frame.float().permute(0, 3, 1, 2)
-    elif hasattr(n_frame, '__array__'):  # 处理类似 LazyFrames 的对象
+    elif hasattr(n_frame, '__array__'):
         return fp(np.array(n_frame))
     else:
         raise ValueError(f"Unsupported frame type: {type(n_frame)}. Expected numpy array or torch tensor.")
@@ -98,4 +95,4 @@ class FrameProcessor:
     def process(self, frame: np.ndarray) -> np.ndarray:
         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
         frame = cv2.resize(frame, (self.im_size, self.im_size), interpolation=cv2.INTER_AREA)
-        return frame[:, :, None]  # Add a channel dimension
+        return frame[:, :, None]
