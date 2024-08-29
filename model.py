@@ -14,8 +14,11 @@ class DQN(nn.Module):
     def __init__(self, h: int, w: int, outputs: int):
         super(DQN, self).__init__()
         self.conv1 = nn.Conv2d(4, 32, kernel_size=8, stride=4)
+        self.bn1 = nn.BatchNorm2d(32)
         self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
+        self.bn2 = nn.BatchNorm2d(64)
         self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
+        self.bn3 = nn.BatchNorm2d(64)
         
         def conv2d_size_out(size, kernel_size=3, stride=1):
             return (size - (kernel_size - 1) - 1) // stride + 1
@@ -24,15 +27,15 @@ class DQN(nn.Module):
         convh = conv2d_size_out(conv2d_size_out(conv2d_size_out(h, 8, 4), 4, 2), 3, 1)
         linear_input_size = convw * convh * 64
         
-        self.fc = nn.Linear(linear_input_size, 512)
-        self.out = nn.Linear(512, outputs)
+        self.fc1 = nn.Linear(linear_input_size, 512)
+        self.fc2 = nn.Linear(512, outputs)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = F.relu(self.conv3(x))
-        x = F.relu(self.fc(x.view(x.size(0), -1)))
-        return self.out(x)
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = F.relu(self.bn3(self.conv3(x)))
+        x = F.relu(self.fc1(x.view(x.size(0), -1)))
+        return self.fc2(x)
 
     def init_weights(self, m: nn.Module):
         if isinstance(m, (nn.Linear, nn.Conv2d)):
@@ -42,10 +45,15 @@ class DQN(nn.Module):
 
 class ReplayMemory:
     def __init__(self, capacity: int):
-        self.memory = deque([], maxlen=capacity)
+        self.capacity = capacity
+        self.memory = []
+        self.position = 0
 
     def push(self, *args):
-        self.memory.append(Transition(*args))
+        if len(self.memory) < self.capacity:
+            self.memory.append(None)
+        self.memory[self.position] = Transition(*args)
+        self.position = (self.position + 1) % self.capacity
 
     def sample(self, batch_size: int) -> List[Transition]:
         return random.sample(self.memory, batch_size)

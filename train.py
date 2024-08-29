@@ -60,6 +60,10 @@ def optimize_model(policy_net: m.DQN, target_net: m.DQN, optimizer: optim.Optimi
     torch.nn.utils.clip_grad_norm_(policy_net.parameters(), max_norm=100)
     optimizer.step()
 
+    # Clear unnecessary tensors from GPU memory
+    del state_batch, action_batch, reward_batch, non_final_mask, non_final_next_states
+    torch.cuda.empty_cache()
+
     return loss.item()
 
 def evaluate(policy_net: m.DQN, env: Any, action_selector: m.ActionSelector, device: torch.device, 
@@ -168,6 +172,10 @@ def main():
         if (step + 1) % config['save_frequency'] == 0:
             save_checkpoint(step + 1, policy_net, optimizer, best_eval_reward,
                             os.path.join(config['save_dir'], f'{config["env_name"]}_checkpoint_step_{step+1}.pth'))
+
+        # Periodically clear CUDA cache
+        if step % 10000 == 0:
+            torch.cuda.empty_cache()
 
     final_model_path = os.path.join(config['save_dir'], f'{config["env_name"]}_final_model.pth')
     torch.save(policy_net.state_dict(), final_model_path)
